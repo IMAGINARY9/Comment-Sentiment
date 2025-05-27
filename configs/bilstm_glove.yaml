@@ -1,0 +1,50 @@
+# Configuration for Bi-LSTM model for comment sentiment
+model:
+  type: "bilstm"
+  embedding_dim: 300
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.3
+  bidirectional: true
+  num_labels: 3
+  max_length: 128
+
+# Embeddings
+embeddings:
+  type: "glove"  # glove, word2vec, fasttext
+  path: "./embeddings/glove.twitter.27B.300d.txt"
+  dim: 300
+  trainable: false
+
+# Training parameters
+training:
+  batch_size: 64
+  learning_rate: 0.001
+  num_epochs: 20
+  patience: 5  # Early stopping
+  weight_decay: 1e-4
+  gradient_clip: 1.0
+
+# Data parameters
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  label_column: "sentiment"
+  vocab_size: 20000
+  min_freq: 2
+
+# Preprocessing for LSTM
+preprocessing:
+  clean_text: true
+  handle_emojis: "remove"
+  expand_contractions: true
+  remove_stopwords: false
+  normalize_case: true
+  tokenize: "nltk"
+
+# Evaluation
+evaluation:
+  metrics: ["accuracy", "f1", "precision", "recall"]
+  average: "weighted"

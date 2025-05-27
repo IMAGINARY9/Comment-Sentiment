@@ -1,0 +1,58 @@
+# Configuration for Twitter sentiment analysis using RoBERTa
+model:
+  name: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+  num_labels: 3
+  max_length: 280  # Twitter limit
+  dropout: 0.1
+
+# Training parameters
+training:
+  batch_size: 32
+  learning_rate: 2e-5
+  num_epochs: 5
+  warmup_steps: 100
+  weight_decay: 0.01
+  save_steps: 500
+  eval_steps: 250
+  logging_steps: 50
+
+# Data parameters
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  label_column: "sentiment"
+  platform: "twitter"
+  
+# Twitter-specific preprocessing
+preprocessing:
+  clean_text: true
+  handle_mentions: true
+  handle_hashtags: true
+  handle_urls: true
+  handle_emojis: "convert"  # convert, remove, keep
+  expand_contractions: true
+  correct_spelling: false  # Can be slow
+  remove_stopwords: false
+  normalize_case: true
+
+# Evaluation
+evaluation:
+  metrics: ["accuracy", "f1", "precision", "recall"]
+  average: "weighted"
+  
+# Ensemble settings
+ensemble:
+  use_vader: true
+  use_textblob: true
+  vader_weight: 0.3
+  textblob_weight: 0.2
+  transformer_weight: 0.5
+
+# Paths
+paths:
+  data_dir: "./data"
+  model_dir: "./models"
+  log_dir: "./logs"
+  lexicons_dir: "./lexicons"
