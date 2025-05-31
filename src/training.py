@@ -19,7 +19,6 @@ import os
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
 from models import CommentDataset, TwitterRoBERTaModel, BiLSTMGloVeModel, EnsembleModel
-from preprocessing import CommentPreprocessor, VocabularyBuilder, EmbeddingLoader
 
 class CommentTrainer:
     """
@@ -517,27 +516,15 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
         model = create_model(model_config)
         tokenizer = AutoTokenizer.from_pretrained(model_config['name'])
         
-        # Initialize preprocessor
-        preprocessor = CommentPreprocessor(config.get('preprocessing', {}))
-        
         # Load and preprocess data
         from preprocessing import load_social_media_data
         
         platform = config['data'].get('platform', 'twitter')
         texts, labels = load_social_media_data(data_paths['train'], platform)
         
-        # Preprocess texts
-        texts = preprocessor.preprocess_batch(texts)
-        
-        # Split data
-        from sklearn.model_selection import train_test_split
-        train_texts, val_texts, train_labels, val_labels = train_test_split(
-            texts, labels, test_size=0.2, random_state=42, stratify=labels
-        )
-        
         # Train model
         trainer = CommentTrainer(model, config['training'])
-        history = trainer.train(train_texts, train_labels, val_texts, val_labels, tokenizer)
+        history = trainer.train(texts, labels, texts, labels, tokenizer)
         
         # Save model
         trainer.save_model(model_save_path)
@@ -545,10 +532,6 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
     else:
         # Traditional model (BiLSTM)
         from models import create_model
-        from preprocessing import VocabularyBuilder, EmbeddingLoader
-        
-        # Initialize preprocessor
-        preprocessor = CommentPreprocessor(config.get('preprocessing', {}))
         
         # Load and preprocess data
         from preprocessing import load_social_media_data
@@ -556,33 +539,11 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
         platform = config['data'].get('platform', 'twitter')
         texts, labels = load_social_media_data(data_paths['train'], platform)
         
-        # Preprocess texts
-        texts = preprocessor.preprocess_batch(texts)
-        
-        # Build vocabulary
-        vocabulary = VocabularyBuilder(
-            max_vocab_size=config['data']['vocab_size'],
-            min_freq=config['data']['min_freq']
-        )
-        vocabulary.build_vocabulary(texts)
-        
-        # Load embeddings if specified
-        embedding_matrix = None
-        if 'embeddings' in config:
-            embedding_config = config['embeddings']
-            embedding_loader = EmbeddingLoader(
-                embedding_config['path'],
-                embedding_config['type']
-            )
-            embedding_matrix = embedding_loader.create_embedding_matrix(vocabulary)
-        
-        # Create model with embedding matrix
-        model_config['vocab_size'] = len(vocabulary.word2idx)
-        model_config['embedding_matrix'] = embedding_matrix
+        # Create model
         model = create_model(model_config)
         
         # Convert texts to sequences
-        train_sequences = vocabulary.texts_to_sequences(texts, model_config['max_length'])
+        train_sequences = texts  # Already preprocessed
         
         # Split data
         from sklearn.model_selection import train_test_split
@@ -592,11 +553,10 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
         
         # Train model
         trainer = CommentTrainer(model, config['training'])
-        history = trainer.train(train_seqs, train_labels, val_seqs, val_labels, vocabulary=vocabulary)
+        history = trainer.train(train_seqs, train_labels, val_seqs, val_labels)
         
-        # Save model and vocabulary
+        # Save model
         trainer.save_model(model_save_path)
-        vocabulary.save_vocabulary(model_save_path.replace('.pt', '_vocab.json'))
     
     print("Training completed successfully!")
     

@@ -46,6 +46,9 @@ if errorlevel 1 (
     echo WARNING: Failed to upgrade pip
 )
 
+REM Upgrade pip, setuptools, and wheel
+python -m pip install --upgrade pip setuptools wheel
+
 echo.
 echo Installing project dependencies...
 pip install -r requirements.txt
@@ -73,11 +76,35 @@ if not exist "logs\training" mkdir logs\training
 if not exist "reports\figures" mkdir reports\figures
 if not exist "lexicons\custom" mkdir lexicons\custom
 
+REM Install Jupyter kernel for this environment
+python -m ipykernel install --user --name=comment-sentiment-env --display-name="Python (Comment Sentiment)"
+
+REM Create necessary directories (expanded)
+for %%d in (data models logs outputs reports notebooks visualizations cache lexicons) do (
+    if not exist %%d (
+        mkdir %%d
+        echo Created directory: %%d
+    )
+)
+
+REM Add .pth file for PYTHONPATH
+if exist venv\Lib\site-packages (
+    for /f %%i in ('cd') do echo %%i > venv\Lib\site-packages\comment_sentiment.pth
+    echo Created .pth file for automatic Python path configuration
+)
+
 echo.
 echo Downloading NLTK data...
-python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('stopwords', quiet=True); nltk.download('vader_lexicon', quiet=True); print('NLTK data downloaded successfully!')"
+python -c "import nltk; [nltk.download(x, quiet=True) for x in ['punkt','stopwords','vader_lexicon','wordnet']]"
 if errorlevel 1 (
     echo WARNING: Failed to download NLTK data
+)
+
+echo.
+echo Downloading pre-trained transformer model (Twitter-RoBERTa)...
+python -c "from transformers import AutoModel, AutoTokenizer; AutoModel.from_pretrained('cardiffnlp/twitter-roberta-base-sentiment-latest'); AutoTokenizer.from_pretrained('cardiffnlp/twitter-roberta-base-sentiment-latest')"
+if errorlevel 1 (
+    echo WARNING: Failed to download pre-trained transformer model
 )
 
 echo.

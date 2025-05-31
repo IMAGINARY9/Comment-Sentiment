@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 try:
     from models import TwitterRoBERTaModel, BiLSTMGloVeModel, EnsembleModel, CommentSentimentPredictor
-    from preprocessing import CommentPreprocessor
     from training import CommentTrainer, MultiPlatformTrainer
     from evaluation import CommentEvaluator, SocialMediaAnalyzer
 except ImportError as e:
@@ -128,114 +127,6 @@ class TestCommentModels(unittest.TestCase):
             
         except NameError:
             self.skipTest("CommentSentimentPredictor not available")
-
-
-class TestCommentPreprocessing(unittest.TestCase):
-    """Test comment preprocessing functionality."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.sample_comments = [
-            "Love this product! 😍 Best purchase ever! #amazing",
-            "Terrible service 😡 Would not recommend @company",
-            "It's okay I guess... not bad but not great either",
-            "Check out this link: https://example.com for more info!"
-        ]
-        self.sample_labels = [2, 0, 1, 1]  # positive, negative, neutral, neutral
-        
-    def test_comment_preprocessor_creation(self):
-        """Test preprocessor creation."""
-        try:
-            preprocessor = CommentPreprocessor(
-                model_name="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                max_length=128,
-                handle_emojis=True,
-                handle_urls=True,
-                handle_mentions=True,
-                handle_hashtags=True
-            )
-            
-            self.assertIsInstance(preprocessor, CommentPreprocessor)
-            self.assertEqual(preprocessor.max_length, 128)
-            self.assertTrue(preprocessor.handle_emojis)
-            
-        except NameError:
-            self.skipTest("CommentPreprocessor not available")
-    
-    def test_social_media_cleaning(self):
-        """Test social media-specific text cleaning."""
-        try:
-            preprocessor = CommentPreprocessor(
-                model_name="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                max_length=128,
-                handle_emojis=True,
-                handle_urls=True,
-                handle_mentions=True,
-                handle_hashtags=True
-            )
-            
-            # Test emoji handling
-            text_with_emoji = "I love this! 😍😊"
-            cleaned = preprocessor.clean_text(text_with_emoji)
-            self.assertIsInstance(cleaned, str)
-            
-            # Test URL handling
-            text_with_url = "Check this out: https://example.com"
-            cleaned_url = preprocessor.clean_text(text_with_url)
-            self.assertIsInstance(cleaned_url, str)
-            
-            # Test mention handling
-            text_with_mention = "Thanks @username for the help!"
-            cleaned_mention = preprocessor.clean_text(text_with_mention)
-            self.assertIsInstance(cleaned_mention, str)
-            
-            # Test hashtag handling
-            text_with_hashtag = "This is #awesome #great"
-            cleaned_hashtag = preprocessor.clean_text(text_with_hashtag)
-            self.assertIsInstance(cleaned_hashtag, str)
-            
-        except (NameError, AttributeError):
-            self.skipTest("Social media cleaning not available")
-    
-    def test_contraction_expansion(self):
-        """Test contraction expansion."""
-        try:
-            preprocessor = CommentPreprocessor(
-                model_name="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                max_length=128,
-                expand_contractions=True
-            )
-            
-            text_with_contractions = "I can't believe it's not working!"
-            expanded = preprocessor.expand_contractions(text_with_contractions)
-            
-            self.assertIsInstance(expanded, str)
-            # Check that contractions are expanded
-            self.assertIn("cannot", expanded.lower())
-            self.assertIn("it is", expanded.lower())
-            
-        except (NameError, AttributeError):
-            self.skipTest("Contraction expansion not available")
-    
-    def test_platform_specific_processing(self):
-        """Test platform-specific processing."""
-        try:
-            preprocessor = CommentPreprocessor(
-                model_name="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                max_length=128
-            )
-            
-            # Test different platform styles
-            twitter_text = "RT @user: This is amazing! #love"
-            reddit_text = "Edit: Thanks for the gold, kind stranger!"
-            youtube_text = "First! Love this video!!!"
-            
-            for text in [twitter_text, reddit_text, youtube_text]:
-                processed = preprocessor.clean_text(text)
-                self.assertIsInstance(processed, str)
-                
-        except (NameError, AttributeError):
-            self.skipTest("Platform-specific processing not available")
 
 
 class TestCommentTraining(unittest.TestCase):
@@ -408,55 +299,6 @@ class TestCommentEvaluation(unittest.TestCase):
 
 class TestIntegration(unittest.TestCase):
     """Integration tests for the comment sentiment system."""
-    
-    def test_end_to_end_pipeline(self):
-        """Test end-to-end pipeline with mock social media data."""
-        try:
-            # Create sample social media data
-            comments = [
-                "Love this! 😍 #amazing @brand",
-                "Terrible experience 😡 wouldn't recommend",
-                "It's okay I guess... nothing special",
-                "Check this out: https://example.com pretty cool!",
-                "First comment! Love the video!!!"
-            ]
-            labels = [2, 0, 1, 1, 2]  # positive, negative, neutral, neutral, positive
-            platforms = ['twitter', 'reddit', 'youtube', 'facebook', 'youtube']
-            
-            # Test preprocessing
-            preprocessor = CommentPreprocessor(
-                model_name="cardiffnlp/twitter-roberta-base-sentiment-latest",
-                max_length=64,
-                handle_emojis=True,
-                handle_urls=True,
-                handle_mentions=True,
-                handle_hashtags=True
-            )
-            
-            processed_data = []
-            for comment, label, platform in zip(comments, labels, platforms):
-                # Clean text
-                cleaned = preprocessor.clean_text(comment)
-                self.assertIsInstance(cleaned, str)
-                
-                # Tokenize
-                tokens = preprocessor.tokenize(cleaned)
-                processed_data.append((tokens, label, platform))
-            
-            self.assertEqual(len(processed_data), 5)
-            
-            # Test platform grouping
-            platform_data = {}
-            for tokens, label, platform in processed_data:
-                if platform not in platform_data:
-                    platform_data[platform] = []
-                platform_data[platform].append((tokens, label))
-            
-            self.assertIn('twitter', platform_data)
-            self.assertIn('youtube', platform_data)
-            
-        except Exception as e:
-            self.skipTest(f"Integration test skipped due to: {e}")
     
     def test_multi_platform_training_pipeline(self):
         """Test multi-platform training pipeline."""

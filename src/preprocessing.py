@@ -47,27 +47,27 @@ class CommentPreprocessor:
         self.config = config or {}
         
         # Default settings
-        self.clean_text = self.config.get('clean_text', True)
-        self.handle_mentions = self.config.get('handle_mentions', True)
-        self.handle_hashtags = self.config.get('handle_hashtags', True)
-        self.handle_urls = self.config.get('handle_urls', True)
-        self.handle_emojis = self.config.get('handle_emojis', 'convert')  # convert, remove, keep
-        self.expand_contractions = self.config.get('expand_contractions', True)
-        self.correct_spelling = self.config.get('correct_spelling', False)
-        self.remove_stopwords = self.config.get('remove_stopwords', False)
-        self.normalize_case = self.config.get('normalize_case', True)
+        self.clean_text_flag = self.config.get('clean_text', True)
+        self.handle_mentions_flag = self.config.get('handle_mentions', True)
+        self.handle_hashtags_flag = self.config.get('handle_hashtags', True)
+        self.handle_urls_flag = self.config.get('handle_urls', True)
+        self.handle_emojis_mode = self.config.get('handle_emojis', 'convert')  # convert, remove, keep
+        self.expand_contractions_flag = self.config.get('expand_contractions', True)
+        self.correct_spelling_flag = self.config.get('correct_spelling', False)
+        self.remove_stopwords_flag = self.config.get('remove_stopwords', False)
+        self.normalize_case_flag = self.config.get('normalize_case', True)
         
         # Initialize components
         self.stop_words = set(stopwords.words('english'))
         self._init_contraction_mapping()
         
-        if self.correct_spelling:
+        if self.correct_spelling_flag:
             try:
                 from textblob import TextBlob
                 self.spell_checker = TextBlob
             except ImportError:
                 print("Warning: TextBlob not available for spell checking")
-                self.correct_spelling = False
+                self.correct_spelling_flag = False
     
     def _init_contraction_mapping(self):
         """Initialize contraction expansion mapping."""
@@ -131,7 +131,7 @@ class CommentPreprocessor:
         Returns:
             Text with URLs processed
         """
-        if not self.handle_urls:
+        if not self.handle_urls_flag:
             return text
         
         # Replace URLs with placeholder
@@ -154,7 +154,7 @@ class CommentPreprocessor:
         Returns:
             Text with mentions processed
         """
-        if not self.handle_mentions:
+        if not self.handle_mentions_flag:
             return text
         
         # Replace mentions with placeholder
@@ -172,7 +172,7 @@ class CommentPreprocessor:
         Returns:
             Text with hashtags processed
         """
-        if not self.handle_hashtags:
+        if not self.handle_hashtags_flag:
             return text
         
         # Extract text from hashtags (remove # but keep the word)
@@ -190,11 +190,11 @@ class CommentPreprocessor:
         Returns:
             Text with emojis processed
         """
-        if self.handle_emojis == 'remove':
+        if self.handle_emojis_mode == 'remove':
             # Remove all emojis
             text = emoji.demojize(text)
             text = re.sub(r':[a-z_&+-]+:', '', text)
-        elif self.handle_emojis == 'convert':
+        elif self.handle_emojis_mode == 'convert':
             # Convert emojis to text descriptions
             text = emoji.demojize(text)
             text = re.sub(r':', ' ', text)
@@ -212,7 +212,7 @@ class CommentPreprocessor:
         Returns:
             Text with contractions expanded
         """
-        if not self.expand_contractions:
+        if not self.expand_contractions_flag:
             return text
         
         # Convert to lowercase for matching
@@ -233,7 +233,7 @@ class CommentPreprocessor:
         Returns:
             Text with corrected spelling
         """
-        if not self.correct_spelling:
+        if not self.correct_spelling_flag:
             return text
         
         try:
@@ -252,7 +252,7 @@ class CommentPreprocessor:
         Returns:
             Text with stopwords removed
         """
-        if not self.remove_stopwords:
+        if not self.remove_stopwords_flag:
             return text
         
         words = word_tokenize(text.lower())
@@ -270,7 +270,7 @@ class CommentPreprocessor:
         Returns:
             Case-normalized text
         """
-        if not self.normalize_case:
+        if not self.normalize_case_flag:
             return text
         
         return text.lower()
@@ -289,7 +289,7 @@ class CommentPreprocessor:
             text = str(text)
         
         # Apply preprocessing steps in order
-        if self.clean_text:
+        if self.clean_text_flag:
             text = self.clean_basic_text(text)
         
         text = self.handle_urls(text)
@@ -297,16 +297,16 @@ class CommentPreprocessor:
         text = self.handle_hashtags(text)
         text = self.handle_emojis(text)
         
-        if self.expand_contractions:
+        if self.expand_contractions_flag:
             text = self.expand_contractions(text)
         
-        if self.correct_spelling:
+        if self.correct_spelling_flag:
             text = self.correct_spelling(text)
         
-        if self.normalize_case:
+        if self.normalize_case_flag:
             text = self.normalize_case(text)
         
-        if self.remove_stopwords:
+        if self.remove_stopwords_flag:
             text = self.remove_stopwords(text)
         
         # Final cleanup
