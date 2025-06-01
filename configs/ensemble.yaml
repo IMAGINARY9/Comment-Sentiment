@@ -1,0 +1,49 @@
+# Configuration for an ensemble model (transformer + lexicon)
+model:
+  type: "ensemble"
+  name: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+  num_labels: 3
+  max_length: 280
+  dropout: 0.1
+  transformer_weight: 0.6
+  vader_weight: 0.25
+  textblob_weight: 0.15
+
+training:
+  batch_size: 32
+  learning_rate: 2e-5
+  num_epochs: 4
+  warmup_steps: 100
+  weight_decay: 0.01
+  save_steps: 500
+  eval_steps: 250
+  logging_steps: 50
+  patience: 2
+
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  label_column: "sentiment"
+  platform: "twitter"
+
+preprocessing:
+  clean_text: true
+  handle_mentions: true
+  handle_hashtags: true
+  handle_urls: true
+  handle_emojis: "convert"
+  expand_contractions: true
+  correct_spelling: false
+  remove_stopwords: false
+  normalize_case: true
+
+evaluation:
+  metrics: ["accuracy", "f1", "precision", "recall"]
+  average: "weighted"
+ensemble:
+  use_vader: true
+  use_textblob: true
+  vader_weight: 0.25
+  textblob_weight: 0.15

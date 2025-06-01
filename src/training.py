@@ -9,7 +9,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
-from transformers import AdamW, get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 import numpy as np
 import wandb
 from typing import Dict, List, Optional, Tuple, Union
@@ -46,7 +47,7 @@ class CommentTrainer:
         
         # Training parameters
         self.batch_size = config.get('batch_size', 32)
-        self.learning_rate = config.get('learning_rate', 2e-5)
+        self.learning_rate = float(config.get('learning_rate', 2e-5))
         self.num_epochs = config.get('num_epochs', 5)
         self.warmup_steps = config.get('warmup_steps', 100)
         self.weight_decay = config.get('weight_decay', 0.01)

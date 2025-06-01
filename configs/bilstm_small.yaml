@@ -1,0 +1,45 @@
+# Configuration for a small BiLSTM model (optimized for speed/memory)
+model:
+  type: "bilstm"
+  embedding_dim: 100
+  hidden_dim: 64
+  num_layers: 1
+  dropout: 0.2
+  bidirectional: true
+  num_labels: 3
+  max_length: 64
+
+embeddings:
+  type: "glove"
+  path: "./embeddings/glove.twitter.27B.100d.txt"
+  dim: 100
+  trainable: false
+
+training:
+  batch_size: 128
+  learning_rate: 0.002
+  num_epochs: 10
+  patience: 3
+  weight_decay: 1e-4
+  gradient_clip: 1.0
+
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  label_column: "sentiment"
+  vocab_size: 10000
+  min_freq: 2
+
+preprocessing:
+  clean_text: true
+  handle_emojis: "remove"
+  expand_contractions: true
+  remove_stopwords: false
+  normalize_case: true
+  tokenize: "nltk"
+
+evaluation:
+  metrics: ["accuracy", "f1", "precision", "recall"]
+  average: "weighted"

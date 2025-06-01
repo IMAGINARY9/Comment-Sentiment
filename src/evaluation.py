@@ -32,7 +32,7 @@ class CommentEvaluator:
     tools for assessing model performance on social media text.
     """
     
-    def __init__(self, model: nn.Module, tokenizer=None, device: str = 'auto'):
+    def __init__(self, model: nn.Module, tokenizer=None, device: str = 'auto', word2idx=None):
         """
         Initialize evaluator.
         
@@ -43,6 +43,7 @@ class CommentEvaluator:
         """
         self.model = model
         self.tokenizer = tokenizer
+        self.word2idx = word2idx
         self.device = device if device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.model.to(self.device)
@@ -52,6 +53,16 @@ class CommentEvaluator:
         self.label_names = ['Negative', 'Neutral', 'Positive']
         self.label_mapping = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
     
+    def texts_to_sequences(self, texts, max_length=128):
+        if not self.word2idx:
+            raise ValueError("word2idx must be provided for BiLSTM evaluation.")
+        sequences = []
+        for t in texts:
+            tokens = t.split()[:max_length]
+            seq = [self.word2idx.get(token, 0) for token in tokens]
+            sequences.append(seq)
+        return sequences
+
     def predict_batch(self, texts: List[str], batch_size: int = 32) -> Tuple[np.ndarray, np.ndarray]:
         """
         Make predictions on a batch of texts.
@@ -97,6 +108,33 @@ class CommentEvaluator:
                     
                     all_predictions.extend(predictions.cpu().numpy())
                     all_probabilities.extend(probabilities.cpu().numpy())
+            elif self.word2idx:
+                # For BiLSTM: convert texts to sequences
+                sequences = self.texts_to_sequences(batch_texts)
+                from torch.utils.data import DataLoader
+                from torch.nn.utils.rnn import pad_sequence
+                class SequenceDataset:
+                    def __init__(self, sequences):
+                        self.sequences = sequences
+                    def __len__(self):
+                        return len(self.sequences)
+                    def __getitem__(self, idx):
+                        return torch.tensor(self.sequences[idx], dtype=torch.long)
+                def collate_fn(batch):
+                    input_ids = pad_sequence(batch, batch_first=True, padding_value=0)
+                    return input_ids
+                dataset = SequenceDataset(sequences)
+                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+                for input_ids in dataloader:
+                    input_ids = input_ids.to(self.device)
+                    with torch.no_grad():
+                        outputs = self.model(input_ids)
+                        logits = outputs['logits']
+                        probabilities = torch.softmax(logits, dim=-1)
+                        predictions = torch.argmax(logits, dim=-1)
+                        
+                        all_predictions.extend(predictions.cpu().numpy())
+                        all_probabilities.extend(probabilities.cpu().numpy())
             else:
                 # For traditional models, need to convert texts to sequences
                 # This would require vocabulary - simplified for now
@@ -691,6 +729,14 @@ def create_evaluation_report(evaluator: CommentEvaluator, texts: List[str],
     import json
     
     # Prepare results for JSON serialization
+    def to_serializable(val):
+        if isinstance(val, np.integer):
+            return int(val)
+        if isinstance(val, np.floating):
+            return float(val)
+        if isinstance(val, np.ndarray):
+            return val.tolist()
+        return val
     json_results = {
         'overall_metrics': {
             'accuracy': float(results['accuracy']),
@@ -705,10 +751,9 @@ def create_evaluation_report(evaluator: CommentEvaluator, texts: List[str],
             'f1': [float(x) for x in results['per_class_metrics']['f1']],
             'support': [int(x) for x in results['per_class_metrics']['support']]
         },
-        'error_analysis': error_analysis,
-        'length_analysis': length_analysis
+        'error_analysis': json.loads(json.dumps(error_analysis, default=to_serializable)),
+        'length_analysis': json.loads(json.dumps(length_analysis, default=to_serializable))
     }
-    
     with open(os.path.join(save_dir, 'evaluation_results.json'), 'w') as f:
         json.dump(json_results, f, indent=2)
     
