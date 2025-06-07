@@ -69,8 +69,21 @@ def main():
         print(f"Label distribution: {dict(zip(*__import__('numpy').unique(train_labels, return_counts=True)))}")
         trainer = CommentTrainer(model, config['training'])
         history = trainer.train(train_texts, train_labels, val_texts, val_labels, tokenizer)
-        model_save_path = f"models/comment_sentiment_{config['data'].get('platform', 'generic')}_transformer_{model_config['name'].replace('/', '_')}_{datetime.now().strftime('%Y%m%d')}.pt"
-        trainer.save_model(model_save_path)
+        # Create a timestamped folder for saving model and config
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        platform = config['data'].get('platform', 'generic')
+        model_name = model_config['name'].replace('/', '_')
+        save_dir = Path(f"models/{platform}_transformer_{model_name}_{timestamp}")
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save model
+        model_save_path = save_dir / "model.pt"
+        trainer.save_model(str(model_save_path))
+
+        # Save config as YAML and JSON
+        config_save_path_yaml = save_dir / "config.yaml"
+        with open(config_save_path_yaml, "w") as f_yaml:
+            yaml.dump(config, f_yaml)
         print(f"Model saved to {model_save_path}")
         if args.evaluate:
             print("Running evaluation...")

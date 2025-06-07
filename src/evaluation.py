@@ -217,11 +217,15 @@ class CommentEvaluator:
         sns.heatmap(
             cm, annot=True, fmt='d', cmap='Blues',
             xticklabels=self.label_names,
-            yticklabels=self.label_names
+            yticklabels=self.label_names,
+            annot_kws={"size": 12},
+            cbar_kws={"shrink": 0.7}
         )
-        plt.title('Confusion Matrix')
-        plt.xlabel('Predicted Label')
-        plt.ylabel('True Label')
+        plt.title('Confusion Matrix', fontsize=16)
+        plt.xlabel('Predicted Label', fontsize=12)
+        plt.ylabel('True Label', fontsize=12)
+        plt.xticks(fontsize=10)
+        plt.yticks(fontsize=10)
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -246,26 +250,24 @@ class CommentEvaluator:
         # Binarize labels
         y_bin = label_binarize(true_labels, classes=[0, 1, 2])
         
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        for i, (class_name, ax) in enumerate(zip(self.label_names, axes)):
+        plt.figure(figsize=(8, 6))
+        for i, class_name in enumerate(self.label_names):
             fpr, tpr, _ = roc_curve(y_bin[:, i], probabilities[:, i])
             auc = roc_auc_score(y_bin[:, i], probabilities[:, i])
-            
-            ax.plot(fpr, tpr, label=f'AUC = {auc:.3f}', linewidth=2)
-            ax.plot([0, 1], [0, 1], 'k--', alpha=0.6)
-            ax.set_xlabel('False Positive Rate')
-            ax.set_ylabel('True Positive Rate')
-            ax.set_title(f'ROC Curve - {class_name}')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            plt.plot(fpr, tpr, label=f'{class_name} (AUC = {auc:.3f})', linewidth=2)
         
+        plt.plot([0, 1], [0, 1], 'k--', alpha=0.6)
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curves (All Classes)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
         
-        return fig
+        return plt.gcf()
     
     def plot_prediction_confidence(self, probabilities: np.ndarray, predictions: np.ndarray,
                                  save_path: Optional[str] = None) -> plt.Figure:

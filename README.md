@@ -386,3 +386,28 @@ def create_model(config):
     if config['type'] == 'custom':
         return CustomSentimentModel(config)
 ```
+
+## Visualization of Prediction Explanations
+
+You can generate and save visual explanations of model predictions (token importances, LIME plots, etc.) for both transformer and LSTM models.
+
+- All visualization logic is implemented in `src/visualization.py`.
+- Plots are saved to the `visualizations/` directory.
+- Requires the `lime` library for transformer explanations (install with `pip install lime`).
+
+### Example Usage
+
+**Single text prediction with visualization:**
+```powershell
+python scripts/predict.py --model_path models/your_model.pt --config configs/twitter_roberta.yaml --input "I love this new update! 😍 #amazing" --visualize
+```
+
+**Batch prediction from file with visualization:**
+```powershell
+python scripts/predict.py --model_path models/your_model.pt --config configs/twitter_roberta.yaml --input_file data/new_comments.txt --visualize
+```
+
+- For each input, a plot will be saved in the `visualizations/` folder showing which tokens most influenced the prediction.
+- For transformer models, LIME is used to highlight important words.
+- For LSTM models, a gradient-based token importance plot is generated.
+- If LIME is not installed, transformer visualizations will not be available (an error message will be shown).

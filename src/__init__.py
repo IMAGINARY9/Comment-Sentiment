@@ -8,14 +8,12 @@ including preprocessing for informal language, emoji handling, and ensemble meth
 __version__ = "0.1.0"
 __author__ = "Sentiment Analysis Team"
 
-from .models import CommentTransformerModel, BiLSTMModel, LexiconModel, EnsembleModel
+# Only import and expose valid symbols
+from .models import EnsembleModel
 from .training import CommentTrainer
 from .evaluation import CommentEvaluator
 
 __all__ = [
-    "CommentTransformerModel",
-    "BiLSTMModel", 
-    "LexiconModel",
     "EnsembleModel",
     "CommentTrainer",
     "CommentEvaluator"
