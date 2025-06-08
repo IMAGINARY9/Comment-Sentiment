@@ -19,7 +19,38 @@ import time
 import os
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
-from models import CommentDataset, TwitterRoBERTaModel, BiLSTMGloVeModel, EnsembleModel
+from models import CommentDataset, TwitterRoBERTaModel, BiLSTMGloVeModel, EnsembleModel, create_model
+
+# --- BiLSTM utilities (from bilstm_trainer.py) ---
+def build_word2idx(sequences):
+    word2idx = {}
+    idx = 1
+    for seq in sequences:
+        for token in seq:
+            if token not in word2idx:
+                word2idx[token] = idx
+                idx += 1
+    return word2idx
+
+class SequenceDataset:
+    def __init__(self, sequences, labels):
+        self.sequences = sequences
+        self.labels = labels
+    def __len__(self):
+        return len(self.sequences)
+    def __getitem__(self, idx):
+        return {
+            'input_ids': torch.tensor(self.sequences[idx], dtype=torch.long),
+            'label': torch.tensor(self.labels[idx], dtype=torch.long)
+        }
+
+def collate_fn(batch):
+    from torch.nn.utils.rnn import pad_sequence
+    input_ids = [item['input_ids'] for item in batch]
+    labels = [item['label'] for item in batch]
+    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    labels = torch.stack(labels)
+    return {'input_ids': input_ids_padded, 'label': labels}
 
 class CommentTrainer:
     """
@@ -50,7 +81,7 @@ class CommentTrainer:
         self.learning_rate = float(config.get('learning_rate', 2e-5))
         self.num_epochs = config.get('num_epochs', 5)
         self.warmup_steps = config.get('warmup_steps', 100)
-        self.weight_decay = config.get('weight_decay', 0.01)
+        self.weight_decay = float(config.get('weight_decay', 0.01))
         self.gradient_clip = config.get('gradient_clip', 1.0)
         self.patience = config.get('patience', 3)
         
@@ -118,6 +149,33 @@ class CommentTrainer:
                            val_texts: List[str], val_labels: List[int],
                            tokenizer=None, vocabulary=None) -> Tuple[DataLoader, DataLoader]:
         """Create training and validation dataloaders."""
+        # If using BiLSTM, use SequenceDataset and collate_fn
+        if isinstance(self.model, BiLSTMGloVeModel):
+            # Assume texts are already tokenized (list of tokens)
+            max_length = self.config.get('max_length', 128)
+            # Build vocab if not provided
+            if vocabulary is None:
+                word2idx = build_word2idx(train_texts)
+            else:
+                word2idx = vocabulary
+            # Convert tokens to indices
+            train_sequences = [[word2idx.get(token, 0) for token in t[:max_length]] for t in train_texts]
+            val_sequences = [[word2idx.get(token, 0) for token in t[:max_length]] for t in val_texts]
+            train_dataset = SequenceDataset(train_sequences, train_labels)
+            val_dataset = SequenceDataset(val_sequences, val_labels)
+            train_dataloader = DataLoader(
+                train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=collate_fn
+            )
+            val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                collate_fn=collate_fn
+            )
+            return train_dataloader, val_dataloader
         
         # Determine max_length based on model type
         max_length = self.config.get('max_length', 280 if tokenizer else 128)
@@ -355,19 +413,34 @@ class CommentTrainer:
         
         return self.history
     
-    def save_model(self, save_path: str) -> None:
-        """Save the trained model."""
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        
-        save_dict = {
-            'model_state_dict': self.model.state_dict(),
-            'config': self.config,
-            'history': self.history,
-            'best_val_f1': self.best_val_f1
-        }
-        
-        torch.save(save_dict, save_path)
-        print(f"Model saved to {save_path}")
+    def save_model(self, save_dir: str = None) -> None:
+        """Save the trained model and config in a timestamped folder."""
+        import datetime
+        import yaml
+        # Use current time for folder name if not provided
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_dir = save_dir if save_dir else f"model_{timestamp}"
+        os.makedirs(base_dir, exist_ok=True)
+
+        # Save model state dict
+        model_path = os.path.join(base_dir, 'model.pt')
+        torch.save(self.model.state_dict(), model_path)
+
+        # Save config as YAML
+        config_path = os.path.join(base_dir, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump(self.config, f)
+
+        # Save training history as npz
+        history_path = os.path.join(base_dir, 'history.npz')
+        np.savez(history_path, **self.history)
+
+        # Save best_val_f1 as a text file
+        best_f1_path = os.path.join(base_dir, 'best_val_f1.txt')
+        with open(best_f1_path, 'w') as f:
+            f.write(str(self.best_val_f1))
+
+        print(f"Model and config saved to {base_dir}")
     
     def load_model(self, load_path: str) -> None:
         """Load a trained model."""

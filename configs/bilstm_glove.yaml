@@ -20,7 +20,7 @@ embeddings:
 training:
   batch_size: 64
   learning_rate: 0.001
-  num_epochs: 20
+  num_epochs: 10
   patience: 5  # Early stopping
   weight_decay: 1e-4
   gradient_clip: 1.0

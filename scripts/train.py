@@ -11,7 +11,6 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from data_utils import load_data_from_config
-from bilstm_trainer import train_bilstm
 from models import create_model
 from training import CommentTrainer
 from evaluation import CommentEvaluator, create_evaluation_report
@@ -93,15 +92,36 @@ def main():
             print(f"Evaluation report and plots saved to {eval_report_dir}")
     elif model_type == 'bilstm':
         print("Training BiLSTM model...")
-        from bilstm_trainer import train_bilstm
-        # train_bilstm returns (model, val_sequences, val_labels, word2idx) if evaluate=True
-        result = train_bilstm(texts, labels, model_config, config['training'], evaluate=args.evaluate)
-        if args.evaluate and result is not None:
-            model, val_seqs, val_labels, word2idx = result
-            # For plots, reconstruct val_texts from val_seqs and word2idx
-            inv_word2idx = {v: k for k, v in word2idx.items()}
-            val_texts = [" ".join([inv_word2idx.get(idx, '') for idx in seq if idx in inv_word2idx]) for seq in val_seqs]
-            evaluator = CommentEvaluator(model, word2idx=word2idx)
+        from sklearn.model_selection import train_test_split
+        train_texts, val_texts, train_labels, val_labels = train_test_split(
+            texts, labels, test_size=0.2, random_state=42, stratify=labels
+        )
+        print(f"Training samples: {len(train_texts)}")
+        print(f"Validation samples: {len(val_texts)}")
+        print(f"Label distribution: {dict(zip(*__import__('numpy').unique(train_labels, return_counts=True)))}")
+        model = create_model(model_config)
+        trainer = CommentTrainer(model, config['training'])
+        history = trainer.train(train_texts, train_labels, val_texts, val_labels)
+        # Create a timestamped folder for saving model and config
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        platform = config['data'].get('platform', 'generic')
+        model_name = model_config.get('name', 'bilstm')
+        save_dir = Path(f"models/{platform}_bilstm_{model_name}_{timestamp}")
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save model
+        model_save_path = save_dir / "model.pt"
+        trainer.save_model(str(model_save_path))
+
+        # Save config as YAML and JSON
+        config_save_path_yaml = save_dir / "config.yaml"
+        with open(config_save_path_yaml, "w") as f_yaml:
+            yaml.dump(config, f_yaml)
+        print(f"Model saved to {model_save_path}")
+        if args.evaluate:
+            print("Running evaluation...")
+            # For BiLSTM, CommentEvaluator can take word2idx from the trainer if needed
+            evaluator = CommentEvaluator(model, word2idx=getattr(trainer, 'word2idx', None))
             eval_report_dir = f"reports/{config['data'].get('platform', 'generic')}_bilstm_eval"
             create_evaluation_report(evaluator, val_texts, val_labels, eval_report_dir)
             print(f"Evaluation report and plots saved to {eval_report_dir}")

@@ -164,7 +164,10 @@ def main():
                 vocab_builder = DummyVocabBuilder(word2idx, max_length)
                 save_path = os.path.join(vis_dir, f"lstm_explain_{i}.png")
                 try:
-                    explain_and_plot_lstm(model, vocab_builder, text, label_names, save_path)
+                    explain_and_plot_lstm(
+                        model, vocab_builder, text, label_names, save_path,
+                        pred_probs=probs[i].cpu().numpy(), pred_label=int(preds[i])
+                    )
                     print(f"Visualization saved to {save_path}")
                 except Exception as e:
                     print(f"Visualization failed: {e}")
