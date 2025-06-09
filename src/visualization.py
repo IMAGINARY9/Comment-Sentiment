@@ -116,7 +116,15 @@ def explain_and_plot_transformer(model, tokenizer, text, label_names, save_path)
     plt.close(fig)
     return save_path
 
-def explain_and_plot_lstm(model, vocab_builder, text, label_names, save_path, pred_probs=None, pred_label=None):
+def explain_and_plot_lstm(
+    model, vocab_builder, text, label_names, save_path, pred_probs=None, pred_label=None,
+    attribution_method="inputxgrad", baseline_type="pad", baseline_text=None, steps=50
+):
+    """
+    Visualize token importances for LSTM models with flexible attribution method and baseline.
+    attribution_method: 'inputxgrad' (default) or 'integrated_gradients'
+    baseline_type: 'pad' (all pad tokens), 'zeros' (all zeros), or 'text' (use baseline_text)
+    """
     from matplotlib import cm
     label_fontsize = 15
     header_fontsize = label_fontsize + 2
@@ -126,74 +134,106 @@ def explain_and_plot_lstm(model, vocab_builder, text, label_names, save_path, pr
     import torch
     import numpy as np
     model.eval()
-    # --- Tokenization: use same as prediction ---
     tokens = vocab_builder.preprocess([text])[0]
     input_ids = vocab_builder.encode([tokens], max_len=vocab_builder.max_len)
     input_tensor = torch.tensor(input_ids, dtype=torch.long)
-    # --- Forward pass for prediction (no grad) ---
+    # Forward pass for prediction
     with torch.no_grad():
         logits = model(input_tensor)["logits"]
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
         pred_label_pred = int(np.argmax(probs))
         pred_prob_pred = float(probs[pred_label_pred])
-    # Use provided pred_probs/pred_label if available (from main prediction)
     if pred_probs is not None and pred_label is not None:
         probs = np.array(pred_probs)
         pred_label_pred = pred_label
         pred_prob_pred = float(probs[pred_label_pred])
-    # --- Attribution: input x gradient ---
-    input_tensor = torch.tensor(input_ids, dtype=torch.long)
-    embeddings = model.embedding(input_tensor)
-    embeddings.retain_grad()
-    embeddings.requires_grad_()  # Only embeddings need gradients, not input_tensor
-    lstm_out, _ = model.lstm(embeddings)
-    attention_weights = torch.softmax(model.attention(lstm_out), dim=1)
-    attended = torch.sum(attention_weights * lstm_out, dim=1)
-    x = model.dropout(attended)
-    x = torch.relu(model.fc1(x))
-    x = model.dropout(x)
-    logits = model.fc2(x)
-    score = logits[0, pred_label_pred]
-    model.zero_grad()
-    score.backward()
-    grad_tensor = embeddings.grad.squeeze()
-    emb_tensor = embeddings.detach().squeeze()
-    if grad_tensor.ndim == 2 and emb_tensor.ndim == 2:
-        contribs = (emb_tensor * grad_tensor).sum(dim=1).cpu().numpy()
-    elif grad_tensor.ndim == 1 and emb_tensor.ndim == 1:
-        contribs = (emb_tensor * grad_tensor).cpu().numpy()
-    else:
-        contribs = grad_tensor.detach().cpu().numpy()
-    real_token_count = len(tokens)
-    contribs = contribs[:real_token_count]
-    # --- Robust normalization ---
-    # Compute baseline logit for pred_label_pred
-    pad_token = getattr(vocab_builder, 'pad_token', None)
+    # Baseline selection
     token2idx = getattr(vocab_builder, 'word2idx', None)
-    if pad_token and token2idx and pad_token in token2idx:
-        pad_token_id = token2idx[pad_token]
-    elif token2idx and '<pad>' in token2idx:
-        pad_token_id = token2idx['<pad>']
-    elif token2idx and len(token2idx) > 0:
-        pad_token_id = list(token2idx.values())[0]
+    pad_token = getattr(vocab_builder, 'pad_token', None)
+    if baseline_type == "pad":
+        if pad_token and token2idx and pad_token in token2idx:
+            pad_token_id = token2idx[pad_token]
+        elif token2idx and '<pad>' in token2idx:
+            pad_token_id = token2idx['<pad>']
+        elif token2idx and len(token2idx) > 0:
+            pad_token_id = list(token2idx.values())[0]
+        else:
+            pad_token_id = 0
+        baseline_ids = [pad_token_id] * vocab_builder.max_len
+    elif baseline_type == "zeros":
+        baseline_ids = [0] * vocab_builder.max_len
+    elif baseline_type == "text" and baseline_text:
+        baseline_tokens = vocab_builder.preprocess([baseline_text])[0]
+        baseline_ids = vocab_builder.encode([baseline_tokens], max_len=vocab_builder.max_len)[0]
     else:
-        pad_token_id = 0
-    baseline_ids = [pad_token_id] * vocab_builder.max_len
-    baseline_tensor = torch.tensor([baseline_ids], dtype=torch.long)
-    with torch.no_grad():
-        baseline_emb = model.embedding(baseline_tensor)
-        baseline_lstm_out, _ = model.lstm(baseline_emb)
-        baseline_attention_weights = torch.softmax(model.attention(baseline_lstm_out), dim=1)
-        baseline_attended = torch.sum(baseline_attention_weights * baseline_lstm_out, dim=1)
-        baseline_x = model.dropout(baseline_attended)
-        baseline_x = torch.relu(model.fc1(baseline_x))
-        baseline_x = model.dropout(baseline_x)
-        baseline_logits = model.fc2(baseline_x)
-        baseline_logit = baseline_logits[0, pred_label_pred].item()
-    logit_diff = score.item() - baseline_logit
-    contrib_sum = contribs.sum() if np.abs(contribs.sum()) > 1e-6 else 1e-6
-    contribs = contribs * (logit_diff / contrib_sum)
-    # --- Plot: tokens in original order, but reversed for y-axis (top = first token) ---
+        baseline_ids = [0] * vocab_builder.max_len
+    # Attribution
+    if attribution_method == "integrated_gradients":
+        # Integrated Gradients implementation
+        input_emb = model.embedding(input_tensor).detach()
+        baseline_tensor = torch.tensor([baseline_ids], dtype=torch.long)
+        baseline_emb = model.embedding(baseline_tensor).detach()
+        alphas = torch.linspace(0, 1, steps).view(-1, 1, 1)
+        total_grad = torch.zeros_like(input_emb)
+        for alpha in alphas:
+            emb = baseline_emb + alpha * (input_emb - baseline_emb)
+            emb.requires_grad_()
+            lstm_out, _ = model.lstm(emb)
+            attention_weights = torch.softmax(model.attention(lstm_out), dim=1)
+            attended = torch.sum(attention_weights * lstm_out, dim=1)
+            x = model.dropout(attended)
+            x = torch.relu(model.fc1(x))
+            x = model.dropout(x)
+            logits = model.fc2(x)
+            score = logits[0, pred_label_pred]
+            model.zero_grad()
+            score.backward(retain_graph=True)
+            grad = emb.grad.detach()
+            total_grad += grad
+        avg_grad = total_grad / steps
+        ig = (input_emb - baseline_emb) * avg_grad
+        contribs = ig.sum(dim=2).squeeze().cpu().numpy()[:len(tokens)]
+    else:
+        # Default: input x gradient
+        input_tensor = torch.tensor(input_ids, dtype=torch.long)
+        embeddings = model.embedding(input_tensor)
+        embeddings.retain_grad()
+        embeddings.requires_grad_()
+        lstm_out, _ = model.lstm(embeddings)
+        attention_weights = torch.softmax(model.attention(lstm_out), dim=1)
+        attended = torch.sum(attention_weights * lstm_out, dim=1)
+        x = model.dropout(attended)
+        x = torch.relu(model.fc1(x))
+        x = model.dropout(x)
+        logits = model.fc2(x)
+        score = logits[0, pred_label_pred]
+        model.zero_grad()
+        score.backward()
+        grad_tensor = embeddings.grad.squeeze()
+        emb_tensor = embeddings.detach().squeeze()
+        if grad_tensor.ndim == 2 and emb_tensor.ndim == 2:
+            contribs = (emb_tensor * grad_tensor).sum(dim=1).cpu().numpy()
+        elif grad_tensor.ndim == 1 and emb_tensor.ndim == 1:
+            contribs = (emb_tensor * grad_tensor).cpu().numpy()
+        else:
+            contribs = grad_tensor.detach().cpu().numpy()
+        contribs = contribs[:len(tokens)]
+        # Normalize by baseline logit difference as before
+        baseline_tensor = torch.tensor([baseline_ids], dtype=torch.long)
+        with torch.no_grad():
+            baseline_emb = model.embedding(baseline_tensor)
+            baseline_lstm_out, _ = model.lstm(baseline_emb)
+            baseline_attention_weights = torch.softmax(model.attention(baseline_lstm_out), dim=1)
+            baseline_attended = torch.sum(baseline_attention_weights * baseline_lstm_out, dim=1)
+            baseline_x = model.dropout(baseline_attended)
+            baseline_x = torch.relu(model.fc1(baseline_x))
+            baseline_x = model.dropout(baseline_x)
+            baseline_logits = model.fc2(baseline_x)
+            baseline_logit = baseline_logits[0, pred_label_pred].item()
+        logit_diff = score.item() - baseline_logit
+        contrib_sum = contribs.sum() if np.abs(contribs.sum()) > 1e-6 else 1e-6
+        contribs = contribs * (logit_diff / contrib_sum)
+    # Plotting (same as before)
     colors = _get_bar_colors(contribs, pos_color, neg_color)
     if label_names[pred_label_pred] == 'neutral':
         colors = [neu_color if c > 0 else neg_color if c < 0 else '#cccccc' for c in contribs]
@@ -206,8 +246,8 @@ def explain_and_plot_lstm(model, vocab_builder, text, label_names, save_path, pr
     print(f"Contributions: {contribs}")
     bars = ax.barh(range(len(tokens_rev)), contribs_rev, color=colors_rev, edgecolor='none', zorder=3, height=bar_height)
     ax.axvline(0, color='#e0e0e0', linewidth=0.7, linestyle='-', zorder=2)
-    ax.set_xlabel("Input × Gradient (Token Attribution)", fontsize=label_fontsize, labelpad=10)
-    ax.set_title(f"LSTM Token Importances\nPrediction: {label_names[pred_label_pred]} (p={pred_prob_pred:.2f})", fontsize=header_fontsize, fontweight='bold', pad=10, color='#222')
+    ax.set_xlabel(f"{'Integrated Gradients' if attribution_method=='integrated_gradients' else 'Input × Gradient'} (Token Attribution)", fontsize=label_fontsize, labelpad=10)
+    ax.set_title(f"LIME LSTM Token Importances\nPrediction: {label_names[pred_label_pred]} (p={pred_prob_pred:.2f})", fontsize=header_fontsize, fontweight='bold', pad=10, color='#222')
     ax.set_yticks(range(len(tokens_rev)))
     ax.set_yticklabels(tokens_rev, fontsize=label_fontsize, fontweight='medium', color='#222')
     _draw_bar_labels(ax, bars, label_fontsize)
@@ -215,7 +255,6 @@ def explain_and_plot_lstm(model, vocab_builder, text, label_names, save_path, pr
     _finalize_plot(fig, ax)
     _add_prob_annotation(ax, label_names, probs, label_fontsize, pred_label_pred)
     fig.subplots_adjust(bottom=0.22, top=0.86, left=0.22, right=0.96)
-    # _add_input_text(fig, text, label_fontsize, bottom=0.01)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=170, bbox_inches='tight', facecolor='white')
     plt.close(fig)

@@ -2,7 +2,7 @@
 Script to evaluate a trained sentiment analysis model.
 
 Usage:
-    python evaluate.py --model_path <path_to_model> --config <config_yaml> --data <data_csv> [--platform <platform>] [--output <output_dir>]
+    python evaluate.py --model_dir <path_to_model_dir> --data <data_csv> [--platform <platform>] [--output <output_dir>]
 """
 import argparse
 import yaml
@@ -12,6 +12,8 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import sys
+import os
+import json
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -25,16 +27,35 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+def find_file_in_dir(directory, patterns):
+    """Find the first file in directory matching any of the patterns."""
+    for pattern in patterns:
+        for file in Path(directory).glob(pattern):
+            return str(file)
+    return None
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate a trained sentiment analysis model')
-    parser.add_argument('--model_path', type=str, required=True, help='Path to trained model (.pt)')
-    parser.add_argument('--config', type=str, required=True, help='Path to config YAML')
+    parser.add_argument('--model_dir', type=str, required=True, help='Directory containing model.pt, config.yaml, and vocab files')
     parser.add_argument('--data', type=str, required=False, help='Path to evaluation data CSV (optional, will use config/platform defaults if not provided)')
     parser.add_argument('--platform', type=str, default=None, help='Platform override (twitter, airline, apple, etc)')
     parser.add_argument('--output', type=str, default=None, help='Directory to save evaluation report and plots')
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    model_dir = Path(args.model_dir)
+    if not model_dir.exists():
+        raise FileNotFoundError(f"Model directory not found: {model_dir}")
+
+    # Find model.pt, config.yaml, and vocab files
+    model_path = find_file_in_dir(model_dir, ["model.pt", "*.pt"])
+    config_path = find_file_in_dir(model_dir, ["config.yaml", "*.yaml", "*.yml"])
+    word2idx_path_json = model_dir / 'word2idx.json'
+    word2idx_path_pkl = model_dir / 'word2idx.pkl'
+
+    if not model_path or not config_path:
+        raise FileNotFoundError(f"Could not find model.pt or config.yaml in {model_dir}")
+
+    config = load_config(config_path)
     platform = args.platform or config['data'].get('platform', 'twitter')
 
     # Data loading logic (same as train.py)
@@ -87,16 +108,33 @@ def main():
     # Model loading logic
     model_config = config['model']
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    word2idx = None
     if model_config.get('type', 'transformer') != 'transformer' and 'roberta' not in model_config.get('name', ''):
-        checkpoint = torch.load(args.model_path, map_location=device)
+        checkpoint = torch.load(model_path, map_location=device)
         word2idx = checkpoint.get('word2idx', None)
+        # Try to load word2idx from a separate file if not found in checkpoint
+        if word2idx is None:
+            if word2idx_path_json.exists():
+                with open(word2idx_path_json, 'r', encoding='utf-8') as f:
+                    word2idx = json.load(f)
+                print(f"Loaded word2idx from {word2idx_path_json}")
+            elif word2idx_path_pkl.exists():
+                import pickle
+                with open(word2idx_path_pkl, 'rb') as f:
+                    word2idx = pickle.load(f)
+                print(f"Loaded word2idx from {word2idx_path_pkl}")
+            else:
+                print("Warning: word2idx not found in checkpoint or as a separate file. BiLSTM evaluation will fail if vocabulary is required.")
         if word2idx is not None:
-            model_config['vocab_size'] = len(word2idx) + 1
+            config['data']['vocab_size'] = len(word2idx) + 1
         model = create_model(model_config)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
     else:
         model = create_model(model_config)
-        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
 

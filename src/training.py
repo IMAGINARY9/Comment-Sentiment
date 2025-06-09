@@ -18,6 +18,7 @@ from tqdm import tqdm
 import time
 import os
 from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.calibration import CalibratedClassifierCV
 
 from models import CommentDataset, TwitterRoBERTaModel, BiLSTMGloVeModel, EnsembleModel, create_model
 
@@ -71,24 +72,25 @@ class CommentTrainer:
         """
         self.model = model
         self.config = config
+        import torch
         self.device = device if device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Move model to device
         self.model.to(self.device)
         
         # Training parameters
-        self.batch_size = config.get('batch_size', 32)
-        self.learning_rate = float(config.get('learning_rate', 2e-5))
-        self.num_epochs = config.get('num_epochs', 5)
-        self.warmup_steps = config.get('warmup_steps', 100)
-        self.weight_decay = float(config.get('weight_decay', 0.01))
-        self.gradient_clip = config.get('gradient_clip', 1.0)
-        self.patience = config.get('patience', 3)
+        self.batch_size = config['training'].get('batch_size', 32)
+        self.learning_rate = float(config['training'].get('learning_rate', 2e-5))
+        self.num_epochs = config['training'].get('num_epochs', 5)
+        self.warmup_steps = config['training'].get('warmup_steps', 100)
+        self.weight_decay = float(config['training'].get('weight_decay', 0.01))
+        self.gradient_clip = config['training'].get('gradient_clip', 1.0)
+        self.patience = config['training'].get('patience', 3)
         
         # Logging
-        self.save_steps = config.get('save_steps', 500)
-        self.eval_steps = config.get('eval_steps', 250)
-        self.logging_steps = config.get('logging_steps', 50)
+        self.save_steps = config['training'].get('save_steps', 500)
+        self.eval_steps = config['training'].get('eval_steps', 250)
+        self.logging_steps = config['training'].get('logging_steps', 50)
         
         # Initialize optimizer and scheduler (will be set during training)
         self.optimizer = None
@@ -104,6 +106,12 @@ class CommentTrainer:
         self.best_val_f1 = 0
         self.best_model_state = None
         self.patience_counter = 0
+        
+        # Class weights
+        self.class_weights = None
+        if 'class_weights' in config['training']:
+            import torch
+            self.class_weights = torch.tensor(config['training']['class_weights'], dtype=torch.float32).to(self.device)
     
     def _setup_optimizer_and_scheduler(self, train_dataloader: DataLoader) -> None:
         """Setup optimizer and learning rate scheduler."""
@@ -141,8 +149,7 @@ class CommentTrainer:
                 self.optimizer,
                 mode='max',
                 factor=0.5,
-                patience=2,
-                verbose=True
+                patience=2
             )
     
     def _create_dataloaders(self, train_texts: List[str], train_labels: List[int],
@@ -151,16 +158,23 @@ class CommentTrainer:
         """Create training and validation dataloaders."""
         # If using BiLSTM, use SequenceDataset and collate_fn
         if isinstance(self.model, BiLSTMGloVeModel):
-            # Assume texts are already tokenized (list of tokens)
-            max_length = self.config.get('max_length', 128)
-            # Build vocab if not provided
+            max_length = self.config['training'].get('max_length', 128) # Use configured max_length
+
+            # Tokenize texts into words
+            train_tokenized_texts = [text.split() for text in train_texts]
+            val_tokenized_texts = [text.split() for text in val_texts]
+
             if vocabulary is None:
-                word2idx = build_word2idx(train_texts)
+                # Build word2idx from actual word tokens from the training set
+                word2idx = build_word2idx(train_tokenized_texts)
             else:
                 word2idx = vocabulary
-            # Convert tokens to indices
-            train_sequences = [[word2idx.get(token, 0) for token in t[:max_length]] for t in train_texts]
-            val_sequences = [[word2idx.get(token, 0) for token in t[:max_length]] for t in val_texts]
+            self.word2idx = word2idx # Store the word-based vocabulary
+
+            # Convert word tokens to indices, truncating at the word level
+            train_sequences = [[self.word2idx.get(token, 0) for token in t_text[:max_length]] for t_text in train_tokenized_texts]
+            val_sequences = [[self.word2idx.get(token, 0) for token in t_text[:max_length]] for t_text in val_tokenized_texts]
+            
             train_dataset = SequenceDataset(train_sequences, train_labels)
             val_dataset = SequenceDataset(val_sequences, val_labels)
             train_dataloader = DataLoader(
@@ -178,7 +192,7 @@ class CommentTrainer:
             return train_dataloader, val_dataloader
         
         # Determine max_length based on model type
-        max_length = self.config.get('max_length', 280 if tokenizer else 128)
+        max_length = self.config['training'].get('max_length', 280 if tokenizer else 128)
         
         # Create datasets
         train_dataset = CommentDataset(train_texts, train_labels, tokenizer, max_length)
@@ -211,6 +225,12 @@ class CommentTrainer:
         
         progress_bar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}')
         
+        # Define criterion with class weights if available
+        if self.class_weights is not None:
+            criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            criterion = nn.CrossEntropyLoss()
+
         for step, batch in enumerate(progress_bar):
             # Move batch to device
             if tokenizer:
@@ -223,18 +243,21 @@ class CommentTrainer:
                 if isinstance(self.model, EnsembleModel):
                     # Ensemble model needs original texts
                     texts = [train_dataloader.dataset.texts[i] for i in range(len(labels))]
-                    outputs = self.model(input_ids, attention_mask, texts, labels)
+                    outputs = self.model(input_ids, attention_mask, texts) # Pass labels to criterion
                 else:
-                    outputs = self.model(input_ids, attention_mask, labels)
+                    outputs = self.model(input_ids, attention_mask) # Pass labels to criterion
+                
+                logits = outputs['logits']
+                loss = criterion(logits, labels) # Calculate loss using criterion
+
             else:
                 # Traditional model
                 input_ids = batch['input_ids'].to(self.device)  # Token sequences
                 labels = batch['label'].to(self.device)
-                
-                outputs = self.model(input_ids, labels)
-            
-            loss = outputs['loss']
-            logits = outputs['logits']
+                logits = self.model(input_ids)
+                if isinstance(logits, dict):
+                    logits = logits['logits']
+                loss = criterion(logits, labels) # Calculate loss using criterion
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -289,6 +312,12 @@ class CommentTrainer:
         all_predictions = []
         all_labels = []
         
+        # Define criterion with class weights if available
+        if self.class_weights is not None:
+            criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            criterion = nn.CrossEntropyLoss()
+
         with torch.no_grad():
             for batch in tqdm(val_dataloader, desc='Validation'):
                 # Move batch to device
@@ -297,26 +326,25 @@ class CommentTrainer:
                     input_ids = batch['input_ids'].to(self.device)
                     attention_mask = batch['attention_mask'].to(self.device)
                     labels = batch['label'].to(self.device)
-                    
+
                     if isinstance(self.model, EnsembleModel):
-                        # Ensemble model needs original texts
                         texts = [val_dataloader.dataset.texts[i] for i in range(len(labels))]
-                        outputs = self.model(input_ids, attention_mask, texts, labels)
+                        outputs = self.model(input_ids, attention_mask, texts)
                     else:
-                        outputs = self.model(input_ids, attention_mask, labels)
+                        outputs = self.model(input_ids, attention_mask)
+                    
+                    logits = outputs['logits']
+                    loss = criterion(logits, labels) # Calculate loss using criterion
                 else:
                     # Traditional model
                     input_ids = batch['input_ids'].to(self.device)
                     labels = batch['label'].to(self.device)
-                    
-                    outputs = self.model(input_ids, labels)
-                
-                loss = outputs['loss']
-                logits = outputs['logits']
-                
+                    logits = self.model(input_ids)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                    loss = criterion(logits, labels) # Calculate loss using criterion
+
                 total_loss += loss.item()
-                
-                # Collect predictions and labels
                 predictions = torch.argmax(logits, dim=-1)
                 all_predictions.extend(predictions.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
@@ -326,28 +354,11 @@ class CommentTrainer:
         f1 = f1_score(all_labels, all_predictions, average='weighted')
         
         return avg_loss, accuracy, f1
-    
+
     def train(self, train_texts: List[str], train_labels: List[int],
               val_texts: List[str], val_labels: List[int],
-              tokenizer=None, vocabulary=None) -> Dict:
-        """
-        Train the model.
-        
-        Args:
-            train_texts: Training texts
-            train_labels: Training labels
-            val_texts: Validation texts
-            val_labels: Validation labels
-            tokenizer: Tokenizer for transformer models
-            vocabulary: Vocabulary for traditional models
-            
-        Returns:
-            Training history dictionary
-        """
-        
-        print(f"Training on {self.device}")
-        print(f"Training samples: {len(train_texts)}")
-        print(f"Validation samples: {len(val_texts)}")
+              tokenizer=None, vocabulary=None, output_dir: str = 'model_output'):
+        """Main training loop."""
         
         # Create dataloaders
         train_dataloader, val_dataloader = self._create_dataloaders(
@@ -357,26 +368,31 @@ class CommentTrainer:
         # Setup optimizer and scheduler
         self._setup_optimizer_and_scheduler(train_dataloader)
         
-        # Training loop
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        print(f"Starting training on {self.device}...")
+        
         for epoch in range(self.num_epochs):
-            print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
+            start_time = time.time()
             
-            # Train
+            # Training phase
             train_loss, train_acc = self._train_epoch(train_dataloader, epoch, tokenizer)
-            
-            # Validate
-            val_loss, val_acc, val_f1 = self._validate_epoch(val_dataloader, tokenizer)
-            
-            # Update scheduler for traditional models
-            if not isinstance(self.model, (TwitterRoBERTaModel, EnsembleModel)):
-                self.scheduler.step(val_f1)
-            
-            # Store history
             self.history['train_loss'].append(train_loss)
             self.history['train_acc'].append(train_acc)
+            
+            # Validation phase
+            val_loss, val_acc, val_f1 = self._validate_epoch(val_dataloader, tokenizer)
             self.history['val_loss'].append(val_loss)
             self.history['val_acc'].append(val_acc)
             self.history['val_f1'].append(val_f1)
+            
+            epoch_time = time.time() - start_time
+            
+            print(f"Epoch {epoch+1}/{self.num_epochs} - "
+                  f"Time: {epoch_time:.2f}s - "
+                  f"Train Loss: {train_loss:.4f} - Train Acc: {train_acc:.4f} - "
+                  f"Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f} - Val F1: {val_f1:.4f}")
             
             # Log to wandb
             if wandb.run:
@@ -386,61 +402,214 @@ class CommentTrainer:
                     'train/epoch_accuracy': train_acc,
                     'val/epoch_loss': val_loss,
                     'val/epoch_accuracy': val_acc,
-                    'val/epoch_f1': val_f1
+                    'val/epoch_f1': val_f1,
+                    'epoch_time': epoch_time
                 })
             
-            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+            # Update scheduler for traditional models (ReduceLROnPlateau)
+            if not isinstance(self.model, (TwitterRoBERTaModel, EnsembleModel)):
+                self.scheduler.step(val_f1) # Use val_f1 for ReduceLROnPlateau
             
-            # Save best model
+            # Early stopping and best model saving
             if val_f1 > self.best_val_f1:
                 self.best_val_f1 = val_f1
-                self.best_model_state = self.model.state_dict().copy()
+                self.best_model_state = self.model.state_dict()
                 self.patience_counter = 0
-                print(f"New best model! F1: {val_f1:.4f}")
+                # Save best model checkpoint
+                self.save_model(os.path.join(output_dir, 'best_model.pt'), epoch=epoch, val_f1=val_f1)
             else:
                 self.patience_counter += 1
-                
-            # Early stopping
-            if self.patience_counter >= self.patience:
-                print(f"Early stopping triggered after {epoch + 1} epochs")
-                break
+                if self.patience_counter >= self.patience:
+                    print(f"Early stopping triggered after {self.patience} epochs without improvement.")
+                    break
         
         # Restore best model
-        if self.best_model_state is not None:
+        if self.best_model_state:
             self.model.load_state_dict(self.best_model_state)
-            print(f"Restored best model with F1: {self.best_val_f1:.4f}")
+            print(f"Restored best model with Val F1: {self.best_val_f1:.4f}")
+
+        # Platt Scaling for probability calibration
+        from sklearn.linear_model import LogisticRegression
+        import numpy as np
         
+        print("Performing Platt Scaling for probability calibration...")
+        self.model.eval()
+        all_logits = []
+        all_labels_calib = []
+        with torch.no_grad():
+            for batch in tqdm(val_dataloader, desc='Calibration Data Collection'):
+                if tokenizer:
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    labels = batch['label'].to(self.device)
+                    if isinstance(self.model, EnsembleModel):
+                        texts = [val_dataloader.dataset.texts[i] for i in range(len(labels))]
+                        outputs = self.model(input_ids, attention_mask, texts)
+                    else:
+                        outputs = self.model(input_ids, attention_mask)
+                    logits = outputs['logits']
+                else:
+                    input_ids = batch['input_ids'].to(self.device)
+                    labels = batch['label'].to(self.device)
+                    logits = self.model(input_ids)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                
+                all_logits.append(logits.cpu().numpy())
+                all_labels_calib.append(labels.cpu().numpy())
+        
+        all_logits = np.concatenate(all_logits, axis=0)
+        all_labels_calib = np.concatenate(all_labels_calib, axis=0)
+        
+        num_classes = all_logits.shape[1]
+        self.calibration_params = {'coef': [], 'intercept': []}
+        
+        for i in range(num_classes):
+            # One-vs-rest calibration
+            binary_labels = (all_labels_calib == i).astype(int)
+            lr = LogisticRegression(solver='liblinear', class_weight='balanced') # Added class_weight
+            lr.fit(all_logits[:, i].reshape(-1, 1), binary_labels) # Calibrate on single logit
+            self.calibration_params['coef'].append(lr.coef_[0][0])
+            self.calibration_params['intercept'].append(lr.intercept_[0])
+        
+        print("Platt Scaling complete. Calibration parameters learned.")
+
+        print("Training complete.")
         return self.history
-    
-    def save_model(self, save_dir: str = None) -> None:
-        """Save the trained model and config in a timestamped folder."""
+
+    def evaluate(self, test_texts: List[str], test_labels: List[int], tokenizer=None, vocabulary=None) -> Dict[str, float]:
+        """Evaluate the model on test data."""
+        
+        # Create test dataloader
+        # Note: Using a dummy list for train_texts/labels as they are not used for test dataloader creation
+        _, test_dataloader = self._create_dataloaders(
+            [], [], test_texts, test_labels, tokenizer, vocabulary
+        )
+        
+        self.model.eval()
+        total_loss = 0
+        all_predictions = []
+        all_labels = []
+        
+        # Define criterion with class weights if available
+        if self.class_weights is not None:
+            criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            criterion = nn.CrossEntropyLoss()
+
+        with torch.no_grad():
+            for batch in tqdm(test_dataloader, desc='Evaluating'):
+                if tokenizer:
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    labels = batch['label'].to(self.device)
+                    if isinstance(self.model, EnsembleModel):
+                        texts = [test_dataloader.dataset.texts[i] for i in range(len(labels))]
+                        outputs = self.model(input_ids, attention_mask, texts)
+                    else:
+                        outputs = self.model(input_ids, attention_mask)
+                    
+                    logits = outputs['logits']
+                    loss = criterion(logits, labels) # Calculate loss using criterion
+                else:
+                    input_ids = batch['input_ids'].to(self.device)
+                    labels = batch['label'].to(self.device)
+                    logits = self.model(input_ids)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                    loss = criterion(logits, labels) # Calculate loss using criterion
+
+                total_loss += loss.item()
+                predictions = torch.argmax(logits, dim=-1)
+                all_predictions.extend(predictions.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        
+        avg_loss = total_loss / len(test_dataloader)
+        accuracy = accuracy_score(all_labels, all_predictions)
+        f1 = f1_score(all_labels, all_predictions, average='weighted')
+        report = classification_report(all_labels, all_predictions, output_dict=True)
+        
+        print(f"Test Loss: {avg_loss:.4f} - Test Acc: {accuracy:.4f} - Test F1: {f1:.4f}")
+        print(classification_report(all_labels, all_predictions))
+        
+        return {'loss': avg_loss, 'accuracy': accuracy, 'f1': f1, 'report': report}
+
+    def save_model(self, path: str, epoch: Optional[int] = None, val_f1: Optional[float] = None, original_config: Optional[Dict] = None):
+        """Save the trained model, config, vocabulary, and training history."""
         import datetime
         import yaml
-        # Use current time for folder name if not provided
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_dir = save_dir if save_dir else f"model_{timestamp}"
-        os.makedirs(base_dir, exist_ok=True)
+        import json
+        import os
+        import pickle
 
-        # Save model state dict
-        model_path = os.path.join(base_dir, 'model.pt')
+        # Determine the base directory for saving all artifacts
+        # If path is a directory, append 'model.pt' to it
+        if os.path.isdir(path) or (not os.path.splitext(path)[1]):
+            base_dir = path
+            model_path = os.path.join(base_dir, 'model.pt')
+        else:
+            base_dir = os.path.dirname(path)
+            model_path = path
+        os.makedirs(base_dir, exist_ok=True) # Ensure the directory exists
+
+        # Save model state dict to the specified path
         torch.save(self.model.state_dict(), model_path)
+        print(f"Model state_dict saved to {model_path}")
 
-        # Save config as YAML
-        config_path = os.path.join(base_dir, 'config.yaml')
-        with open(config_path, 'w') as f:
-            yaml.dump(self.config, f)
+        # Save the original config (with any runtime overrides) as config.yaml in the same directory
+        config_to_save = original_config if original_config is not None else self.config
+        config_filename = 'config.yaml' # Default config filename
+        # If saving a specific checkpoint like 'best_model.pt', name config accordingly
+        model_filename_stem = os.path.splitext(os.path.basename(path))[0]
+        if model_filename_stem != 'model': # e.g. if path is 'best_model.pt'
+            config_filename = f"{model_filename_stem}_config.yaml"
+        
+        config_path = os.path.join(base_dir, config_filename) 
+        try:
+            with open(config_path, 'w') as f:
+                yaml.dump(config_to_save, f)
+            print(f"Configuration saved to {config_path}")
+        except Exception as e:
+            print(f"Error saving config to {config_path}: {e}")
+            # Fallback: save with a generic name if specific naming failed, though less likely
+            fallback_config_path = os.path.join(base_dir, 'config_fallback.yaml')
+            try:
+                with open(fallback_config_path, 'w') as f:
+                    yaml.dump(config_to_save, f)
+                print(f"Configuration saved to {fallback_config_path} (fallback)")
+            except Exception as e_fb:
+                print(f"Error saving config to {fallback_config_path} (fallback): {e_fb}")
 
         # Save training history as npz
         history_path = os.path.join(base_dir, 'history.npz')
         np.savez(history_path, **self.history)
+        print(f"Training history saved to {history_path}")
 
         # Save best_val_f1 as a text file
         best_f1_path = os.path.join(base_dir, 'best_val_f1.txt')
         with open(best_f1_path, 'w') as f:
             f.write(str(self.best_val_f1))
+        print(f"Best validation F1 score ({self.best_val_f1}) saved to {best_f1_path}")
 
-        print(f"Model and config saved to {base_dir}")
+        # Save vocabulary if BiLSTM (word2idx)
+        if hasattr(self, 'word2idx') and self.word2idx is not None: # Check self.word2idx directly
+            vocab_json_path = os.path.join(base_dir, 'word2idx.json')
+            with open(vocab_json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.word2idx, f, ensure_ascii=False, indent=2)
+            
+            vocab_pkl_path = os.path.join(base_dir, 'word2idx.pkl')
+            with open(vocab_pkl_path, 'wb') as f:
+                pickle.dump(self.word2idx, f)
+            print(f"Vocabulary saved to {vocab_json_path} and {vocab_pkl_path}")
+
+        # Save calibration parameters if present
+        if hasattr(self, 'calibration_params') and self.calibration_params is not None:
+            calib_path = os.path.join(base_dir, 'calibration_params.yaml')
+            with open(calib_path, 'w') as f:
+                yaml.dump(self.calibration_params, f)
+            print(f"Calibration parameters saved to {calib_path}")
+        
+        print(f"All artifacts related to {os.path.basename(path)} saved in {base_dir}")
     
     def load_model(self, load_path: str) -> None:
         """Load a trained model."""
@@ -598,10 +767,10 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
         
         # Train model
         trainer = CommentTrainer(model, config['training'])
-        history = trainer.train(texts, labels, texts, labels, tokenizer)
+        history = trainer.train(texts, labels, texts, labels, tokenizer, output_dir=model_save_path)
         
         # Save model
-        trainer.save_model(model_save_path)
+        trainer.save_model(model_save_path, original_config=config)
         
     else:
         # Traditional model (BiLSTM)
@@ -627,12 +796,37 @@ def train_with_config(config_path: str, data_paths: Dict[str, str],
         
         # Train model
         trainer = CommentTrainer(model, config['training'])
-        history = trainer.train(train_seqs, train_labels, val_seqs, val_labels)
+        history = trainer.train(train_seqs, train_labels, val_seqs, val_labels, output_dir=model_save_path)
         
         # Save model
-        trainer.save_model(model_save_path)
+        trainer.save_model(model_save_path, original_config=config)
     
     print("Training completed successfully!")
     
     if use_wandb:
         wandb.finish()
+
+def build_vocabulary_for_bilstm(train_texts: List[str], config: Dict) -> Tuple[Dict[str, int], int]:
+    """
+    Build vocabulary for BiLSTM model from training texts.
+    
+    Args:
+        train_texts: List of training text strings
+        config: Configuration dictionary
+        
+    Returns:
+        Tuple of (word2idx dictionary, vocabulary size)
+    """
+    print("Building vocabulary for BiLSTM model...")
+    
+    # Tokenize texts into words
+    train_tokenized_texts = [text.split() for text in train_texts]
+    
+    # Build vocabulary
+    word2idx = build_word2idx(train_tokenized_texts)
+    vocab_size = len(word2idx)
+    
+    print(f"Vocabulary built with {vocab_size} words")
+    print(f"Sample words: {list(word2idx.keys())[:10]}")
+    
+    return word2idx, vocab_size

@@ -32,7 +32,7 @@ class CommentEvaluator:
     tools for assessing model performance on social media text.
     """
     
-    def __init__(self, model: nn.Module, tokenizer=None, device: str = 'auto', word2idx=None):
+    def __init__(self, model: nn.Module, tokenizer=None, device: str = 'auto', word2idx=None, calibration_params=None):
         """
         Initialize evaluator.
         
@@ -40,10 +40,13 @@ class CommentEvaluator:
             model: Trained model to evaluate
             tokenizer: Tokenizer for transformer models
             device: Device to run evaluation on
+            word2idx: Word-to-index mapping for BiLSTM models
+            calibration_params: Platt scaling calibration parameters
         """
         self.model = model
         self.tokenizer = tokenizer
         self.word2idx = word2idx
+        self.calibration_params = calibration_params
         self.device = device if device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.model.to(self.device)
@@ -53,6 +56,34 @@ class CommentEvaluator:
         self.label_names = ['Negative', 'Neutral', 'Positive']
         self.label_mapping = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
     
+    def _apply_calibration(self, logits: np.ndarray) -> np.ndarray:
+        """
+        Apply Platt scaling calibration to logits.
+        
+        Args:
+            logits: Raw model logits
+            
+        Returns:
+            Calibrated probabilities
+        """
+        if self.calibration_params is None:
+            return torch.softmax(torch.tensor(logits), dim=-1).numpy()
+        
+        num_classes = logits.shape[1]
+        calibrated_probs = np.zeros_like(logits)
+        
+        for i in range(num_classes):
+            # Apply one-vs-rest calibration
+            coef = self.calibration_params['coef'][i]
+            intercept = self.calibration_params['intercept'][i]
+            calibrated_logits = coef * logits[:, i] + intercept
+            calibrated_probs[:, i] = 1 / (1 + np.exp(-calibrated_logits))  # Sigmoid
+        
+        # Normalize to ensure probabilities sum to 1
+        calibrated_probs = calibrated_probs / np.sum(calibrated_probs, axis=1, keepdims=True)
+        
+        return calibrated_probs
+
     def texts_to_sequences(self, texts, max_length=128):
         if not self.word2idx:
             raise ValueError("word2idx must be provided for BiLSTM evaluation.")
@@ -100,11 +131,17 @@ class CommentEvaluator:
                         # Ensemble model
                         outputs = self.model(input_ids, attention_mask, batch_texts)
                     else:
-                        outputs = self.model(input_ids, attention_mask)
-                    
+                        outputs = self.model(input_ids, attention_mask)                    
                     logits = outputs['logits']
-                    probabilities = torch.softmax(logits, dim=-1)
-                    predictions = torch.argmax(logits, dim=-1)
+                    
+                    # Apply calibration if available
+                    if self.calibration_params is not None:
+                        probabilities = self._apply_calibration(logits.cpu().numpy())
+                        probabilities = torch.tensor(probabilities)
+                    else:
+                        probabilities = torch.softmax(logits, dim=-1)
+                    
+                    predictions = torch.argmax(probabilities, dim=-1)
                     
                     all_predictions.extend(predictions.cpu().numpy())
                     all_probabilities.extend(probabilities.cpu().numpy())
@@ -124,14 +161,21 @@ class CommentEvaluator:
                     input_ids = pad_sequence(batch, batch_first=True, padding_value=0)
                     return input_ids
                 dataset = SequenceDataset(sequences)
-                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+                dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)                
                 for input_ids in dataloader:
                     input_ids = input_ids.to(self.device)
                     with torch.no_grad():
                         outputs = self.model(input_ids)
                         logits = outputs['logits']
-                        probabilities = torch.softmax(logits, dim=-1)
-                        predictions = torch.argmax(logits, dim=-1)
+                        
+                        # Apply calibration if available
+                        if self.calibration_params is not None:
+                            probabilities = self._apply_calibration(logits.cpu().numpy())
+                            probabilities = torch.tensor(probabilities)
+                        else:
+                            probabilities = torch.softmax(logits, dim=-1)
+                        
+                        predictions = torch.argmax(probabilities, dim=-1)
                         
                         all_predictions.extend(predictions.cpu().numpy())
                         all_probabilities.extend(probabilities.cpu().numpy())
@@ -175,6 +219,13 @@ class CommentEvaluator:
         
         # Confusion matrix
         cm = confusion_matrix(true_labels, predictions)
+        
+        # Print confusion matrix and warn if only one class is predicted
+        unique_preds = np.unique(predictions)
+        if len(unique_preds) == 1:
+            print(f"[WARNING] Model predicted only one class: {self.label_names[unique_preds[0]]} for all samples.")
+        print("Confusion Matrix:")
+        print(cm)
         
         # ROC AUC (for multiclass)
         try:
